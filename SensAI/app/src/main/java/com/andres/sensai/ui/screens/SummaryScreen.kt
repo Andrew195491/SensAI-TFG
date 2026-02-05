@@ -1,27 +1,24 @@
 package com.andres.sensai.ui.screens
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun SummaryScreen(
-    onFinish: () -> Unit
-) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
+fun SummaryScreen(onFinish: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = "Pantalla de Resumen")
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onFinish) {
-                Text("Volver al inicio")
-            }
-        }
+        Text("Resumen de sesión", style = MaterialTheme.typography.titleLarge)
+        Text("Reps: (placeholder)")
+        Button(onClick = onFinish) { Text("Volver al Home") }
     }
 }
