@@ -63,7 +63,26 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    // Compose BOM (recomendado)
+    implementation(platform("androidx.compose:compose-bom:2026.01.01"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.01.01"))
+
+    // Material3 + icons (arregla Unresolved reference Icons/icons)
+    implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+
+    // Navigation Compose (si lo usas)
+    implementation("androidx.navigation:navigation-compose:2.9.0") // si ya tienes otra, mantenla
+
+    // LocalLifecycleOwner (nuevo import) + compose runtime lifecycle
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+
+    // CameraX
+    implementation("androidx.camera:camera-core:1.5.3")
+    implementation("androidx.camera:camera-camera2:1.5.3")
+    implementation("androidx.camera:camera-lifecycle:1.5.3")
+    implementation("androidx.camera:camera-view:1.5.3")
+
+    // MediaPipe Tasks Vision (PoseLandmarker)
+    implementation("com.google.mediapipe:tasks-vision:0.10.32")
 }
