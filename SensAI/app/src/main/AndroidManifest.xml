@@ -2,10 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 <<<<<<< HEAD
+<<<<<<< HEAD
     <uses-feature
         android:name="android.hardware.camera"
         android:required="true" />
     <uses-permission android:name="android.permission.CAMERA" />
+=======
+>>>>>>> parent of 3ebc7e3 (Implementación inicial IA + Ventana ordenada HOME + retroceso en PERFIL y OBJETIVOS)
 =======
 >>>>>>> parent of 3ebc7e3 (Implementación inicial IA + Ventana ordenada HOME + retroceso en PERFIL y OBJETIVOS)
 
