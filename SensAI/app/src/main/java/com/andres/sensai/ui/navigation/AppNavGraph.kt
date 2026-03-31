@@ -6,10 +6,9 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
-import com.andres.sensai.ui.screens.HomeScreen
+import com.andres.sensai.ui.home.HomeScreen
 import com.andres.sensai.ui.profile.ProfileScreen
 import com.andres.sensai.ui.training.TrainScreen
-import com.andres.sensai.ui.training.PushUpScreen
 import com.andres.sensai.ui.tutorial.TutorialScreen
 
 @Composable
@@ -39,9 +38,5 @@ fun AppNavGraph(navController: NavHostController) {
             TrainScreen(navController = navController)
         }
 
-        // Entrenar solo flexiones
-        composable(NavRoutes.TRAIN_PUSHUP) {
-            PushUpScreen(navController = navController)
-        }
     }
 }

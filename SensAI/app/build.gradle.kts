@@ -58,8 +58,7 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
-<<<<<<< HEAD
-<<<<<<< HEAD
+
     // Compose BOM (recomendado)
     implementation(platform("androidx.compose:compose-bom:2026.01.01"))
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.01.01"))
@@ -82,8 +81,4 @@ dependencies {
 
     // MediaPipe Tasks Vision (PoseLandmarker)
     implementation("com.google.mediapipe:tasks-vision:0.10.32")
-=======
->>>>>>> parent of 3ebc7e3 (Implementación inicial IA + Ventana ordenada HOME + retroceso en PERFIL y OBJETIVOS)
-=======
->>>>>>> parent of 3ebc7e3 (Implementación inicial IA + Ventana ordenada HOME + retroceso en PERFIL y OBJETIVOS)
 }
