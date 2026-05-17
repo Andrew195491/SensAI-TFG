@@ -1,43 +1,52 @@
 package com.andres.sensai.ui.training
 
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
+import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
 class SquatDetector(
-    private val upThreshold: Float = 0.68f,
+    private val upThreshold: Float = 0.72f,
     private val downThreshold: Float = 0.42f,
-    private val stableRequiredMs: Long = 180L,
-    private val repCooldownMs: Long = 300L,
-    private val scoreWindowSize: Int = 6,
-    private val minVisibility: Float = 0.35f
+    private val stableUpMs: Long = 90L,
+    private val stableDownMs: Long = 90L,
+    private val repCooldownMs: Long = 180L,
+    private val minVisibility: Float = 0.35f,
+    private val emaAlpha: Float = 0.40f,
+    private val minVelocity: Float = 0.010f,
+    private val maxAngleJump: Float = 35f,
+    private val minDepthScore: Float = 0.46f,
+    private val minTopScore: Float = 0.68f
 ) {
 
     enum class State {
-        WAIT_UP,      // arriba estable
-        GOING_DOWN,   // bajando
-        WAIT_DOWN,    // abajo estable
-        GOING_UP      // subiendo
+        WAIT_UP,
+        GOING_DOWN,
+        WAIT_DOWN,
+        GOING_UP
     }
 
     data class Debug(
         val rawScore: Float,
         val smoothScore: Float,
-        val metric: Float, // métrica base (0..1): 1 ~ arriba, 0 ~ abajo
+        val metric: Float,
+        val velocity: Float,
         val leftKneeAngle: Float,
         val rightKneeAngle: Float,
         val hipY: Float,
         val kneeY: Float,
         val ankleY: Float,
-        val stableMs: Long
+        val stableMs: Long,
+        val cycleMinScore: Float,
+        val cycleMaxScore: Float
     )
 
     data class Output(
         val reps: Int,
         val state: State,
-        val score: Float,      // score suavizado (0..1)
+        val score: Float,
         val debug: Debug
     )
 
@@ -47,25 +56,45 @@ class SquatDetector(
     private var stateSinceMs: Long = 0L
     private var lastRepAtMs: Long = 0L
 
-    // para suavizar score
-    private val scoreBuffer = ArrayDeque<Float>()
+    private var smoothedScore = 1f
+    private var prevSmoothScore = 1f
 
-    // último debug válido
+    private var cycleMinScore = 1f
+    private var cycleMaxScore = 1f
+
     private var lastRawScore = 1f
     private var lastSmoothScore = 1f
     private var lastMetric = 1f
+    private var lastVelocity = 0f
     private var lastLeftKneeAngle = 180f
     private var lastRightKneeAngle = 180f
     private var lastHipY = 0f
     private var lastKneeY = 0f
     private var lastAnkleY = 0f
+    private var lastKneeAngleAvg = 180f
 
     fun reset(nowMs: Long = 0L) {
         state = State.WAIT_UP
         reps = 0
         stateSinceMs = nowMs
         lastRepAtMs = 0L
-        scoreBuffer.clear()
+
+        smoothedScore = 1f
+        prevSmoothScore = 1f
+
+        cycleMinScore = 1f
+        cycleMaxScore = 1f
+
+        lastRawScore = 1f
+        lastSmoothScore = 1f
+        lastMetric = 1f
+        lastVelocity = 0f
+        lastLeftKneeAngle = 180f
+        lastRightKneeAngle = 180f
+        lastHipY = 0f
+        lastKneeY = 0f
+        lastAnkleY = 0f
+        lastKneeAngleAvg = 180f
     }
 
     fun update(
@@ -74,135 +103,107 @@ class SquatDetector(
     ): Output {
         if (stateSinceMs == 0L) stateSinceMs = nowMs
 
-        // Si no hay landmarks suficientes, no avanzamos estado
         if (landmarks.size < 33) {
-            val debug = Debug(
-                rawScore = lastRawScore,
-                smoothScore = lastSmoothScore,
-                metric = lastMetric,
-                leftKneeAngle = lastLeftKneeAngle,
-                rightKneeAngle = lastRightKneeAngle,
-                hipY = lastHipY,
-                kneeY = lastKneeY,
-                ankleY = lastAnkleY,
-                stableMs = nowMs - stateSinceMs
-            )
-            return Output(reps, state, lastSmoothScore, debug)
+            return buildOutput(nowMs)
         }
 
-        // --- 1) Calcular features robustas ---
         val feat = computeFeatures(landmarks)
-
-        // Si la visibilidad es mala, mantenemos estado y no metemos ruido
         if (!feat.isReliable) {
-            val debug = Debug(
-                rawScore = lastRawScore,
-                smoothScore = lastSmoothScore,
-                metric = lastMetric,
-                leftKneeAngle = lastLeftKneeAngle,
-                rightKneeAngle = lastRightKneeAngle,
-                hipY = lastHipY,
-                kneeY = lastKneeY,
-                ankleY = lastAnkleY,
-                stableMs = nowMs - stateSinceMs
-            )
-            return Output(reps, state, lastSmoothScore, debug)
+            return buildOutput(nowMs)
         }
 
-        // --- 2) Score bruto (0..1): 1=arriba, 0=abajo) ---
+        val kneeAngleAvg = (feat.leftKneeAngle + feat.rightKneeAngle) / 2f
+        if (abs(kneeAngleAvg - lastKneeAngleAvg) > maxAngleJump) {
+            return buildOutput(nowMs)
+        }
+
         val rawScore = feat.upScore
-
-        // --- 3) Suavizado ---
         val smoothScore = smooth(rawScore)
+        val velocity = smoothScore - prevSmoothScore
+        prevSmoothScore = smoothScore
 
-        // --- 4) Máquina de estados ---
         val stableMs = nowMs - stateSinceMs
         val cooldownOk = (nowMs - lastRepAtMs) >= repCooldownMs
 
         when (state) {
             State.WAIT_UP -> {
-                // Estamos arriba. Si empieza a bajar de verdad, cambiamos.
-                if (smoothScore < upThreshold) {
+                cycleMaxScore = max(cycleMaxScore, smoothScore)
+
+                if (smoothScore < upThreshold && velocity < -minVelocity) {
                     state = State.GOING_DOWN
                     stateSinceMs = nowMs
+                    cycleMinScore = smoothScore
                 }
             }
 
             State.GOING_DOWN -> {
-                // Si vuelve arriba, cancelamos bajada.
-                if (smoothScore >= upThreshold) {
+                cycleMinScore = min(cycleMinScore, smoothScore)
+
+                if (smoothScore >= upThreshold && velocity > minVelocity) {
                     state = State.WAIT_UP
                     stateSinceMs = nowMs
-                }
-                // Si llega abajo y se mantiene estable, abajo confirmado.
-                else if (smoothScore <= downThreshold && stableMs >= stableRequiredMs) {
+                    cycleMaxScore = max(cycleMaxScore, smoothScore)
+                } else if (
+                    smoothScore <= downThreshold &&
+                    stableMs >= stableDownMs
+                ) {
                     state = State.WAIT_DOWN
                     stateSinceMs = nowMs
                 }
             }
 
             State.WAIT_DOWN -> {
-                // Estamos abajo. Si empieza a subir, cambiamos.
-                if (smoothScore > downThreshold) {
+                cycleMinScore = min(cycleMinScore, smoothScore)
+
+                if (smoothScore > downThreshold && velocity > minVelocity) {
                     state = State.GOING_UP
                     stateSinceMs = nowMs
+                    cycleMaxScore = smoothScore
                 }
             }
 
             State.GOING_UP -> {
-                // Si vuelve abajo, cancelamos subida.
-                if (smoothScore <= downThreshold) {
+                cycleMaxScore = max(cycleMaxScore, smoothScore)
+
+                if (smoothScore <= downThreshold && velocity < -minVelocity) {
                     state = State.WAIT_DOWN
                     stateSinceMs = nowMs
-                }
-                // Si llega arriba y se mantiene estable -> REP++
-                else if (smoothScore >= upThreshold && stableMs >= stableRequiredMs && cooldownOk) {
+                } else if (
+                    smoothScore >= upThreshold &&
+                    stableMs >= stableUpMs &&
+                    cooldownOk &&
+                    cycleMinScore <= minDepthScore &&
+                    cycleMaxScore >= minTopScore
+                ) {
                     reps += 1
                     lastRepAtMs = nowMs
                     state = State.WAIT_UP
                     stateSinceMs = nowMs
+
+                    cycleMinScore = 1f
+                    cycleMaxScore = smoothScore
                 }
             }
         }
 
-        // Guardar últimos valores debug
         lastRawScore = rawScore
         lastSmoothScore = smoothScore
         lastMetric = feat.metric
+        lastVelocity = velocity
         lastLeftKneeAngle = feat.leftKneeAngle
         lastRightKneeAngle = feat.rightKneeAngle
         lastHipY = feat.hipY
         lastKneeY = feat.kneeY
         lastAnkleY = feat.ankleY
+        lastKneeAngleAvg = kneeAngleAvg
 
-        val debug = Debug(
-            rawScore = rawScore,
-            smoothScore = smoothScore,
-            metric = feat.metric,
-            leftKneeAngle = feat.leftKneeAngle,
-            rightKneeAngle = feat.rightKneeAngle,
-            hipY = feat.hipY,
-            kneeY = feat.kneeY,
-            ankleY = feat.ankleY,
-            stableMs = nowMs - stateSinceMs
-        )
-
-        return Output(
-            reps = reps,
-            state = state,
-            score = smoothScore,
-            debug = debug
-        )
+        return buildOutput(nowMs)
     }
-
-    // =========================
-    // FEATURES
-    // =========================
 
     private data class Features(
         val isReliable: Boolean,
-        val upScore: Float,       // 1=arriba, 0=abajo
-        val metric: Float,        // también 1=arriba, 0=abajo (antes de combinar)
+        val upScore: Float,
+        val metric: Float,
         val leftKneeAngle: Float,
         val rightKneeAngle: Float,
         val hipY: Float,
@@ -211,7 +212,6 @@ class SquatDetector(
     )
 
     private fun computeFeatures(lm: List<NormalizedLandmark>): Features {
-        // MediaPipe indices
         val lHip = lm[23]
         val rHip = lm[24]
         val lKnee = lm[25]
@@ -244,38 +244,44 @@ class SquatDetector(
             )
         }
 
-        // Promedios izquierda/derecha (más robusto)
         val hip = avgPoint(lHip, rHip)
         val knee = avgPoint(lKnee, rKnee)
         val ankle = avgPoint(lAnkle, rAnkle)
         val shoulder = avgPoint(lShoulder, rShoulder)
 
-        val leftKneeAngle = angleDeg(lHip, lKnee, lAnkle)   // ~180 arriba, menor al bajar
-        val rightKneeAngle = angleDeg(rHip, rKnee, rAnkle)  // ~180 arriba, menor al bajar
+        val leftKneeAngle = angleDeg(lHip, lKnee, lAnkle)
+        val rightKneeAngle = angleDeg(rHip, rKnee, rAnkle)
         val kneeAngleAvg = (leftKneeAngle + rightKneeAngle) / 2f
 
-        // Normalización del ángulo de rodilla:
-        // 180° => muy arriba (1.0)
-        // 90°  => muy abajo (0.0)
+        // Frontal/semi frontal: rodillas más permisivas
         val kneeMetricUp = normalize(
             value = kneeAngleAvg,
-            minVal = 90f,
-            maxVal = 175f
+            minVal = 100f,
+            maxVal = 172f
         )
 
-        // Métrica de profundidad vertical relativa:
-        // cuando bajas, la cadera se acerca más a la rodilla
         val torsoLen = distance(shoulder.x, shoulder.y, hip.x, hip.y).coerceAtLeast(1e-5f)
-        val hipToKneeY = (knee.y - hip.y) // >0 normalmente
-        // más grande => más "arriba"; más pequeño => más "abajo"
+
+        // Diferencia vertical cadera-rodilla: arriba grande, abajo pequeña
+        val hipToKneeY = (knee.y - hip.y)
         val verticalMetricUp = normalize(
             value = hipToKneeY / torsoLen,
-            minVal = 0.15f,
-            maxVal = 0.70f
+            minVal = 0.08f,
+            maxVal = 0.58f
         )
 
-        // Mezcla robusta (ángulo pesa más)
-        val metricUp = (0.7f * kneeMetricUp) + (0.3f * verticalMetricUp)
+        // Cadera respecto al tobillo: arriba más alta, abajo menos
+        val hipToAnkleY = (ankle.y - hip.y)
+        val depthMetricUp = normalize(
+            value = hipToAnkleY / torsoLen,
+            minVal = 0.55f,
+            maxVal = 1.45f
+        )
+
+        val metricUp =
+            (0.60f * kneeMetricUp) +
+                    (0.25f * verticalMetricUp) +
+                    (0.15f * depthMetricUp)
 
         return Features(
             isReliable = true,
@@ -289,17 +295,33 @@ class SquatDetector(
         )
     }
 
-    // =========================
-    // HELPERS
-    // =========================
+    private fun buildOutput(nowMs: Long): Output {
+        val debug = Debug(
+            rawScore = lastRawScore,
+            smoothScore = lastSmoothScore,
+            metric = lastMetric,
+            velocity = lastVelocity,
+            leftKneeAngle = lastLeftKneeAngle,
+            rightKneeAngle = lastRightKneeAngle,
+            hipY = lastHipY,
+            kneeY = lastKneeY,
+            ankleY = lastAnkleY,
+            stableMs = nowMs - stateSinceMs,
+            cycleMinScore = cycleMinScore,
+            cycleMaxScore = cycleMaxScore
+        )
+
+        return Output(
+            reps = reps,
+            state = state,
+            score = lastSmoothScore,
+            debug = debug
+        )
+    }
 
     private fun smooth(v: Float): Float {
-        scoreBuffer.addLast(v)
-        while (scoreBuffer.size > scoreWindowSize) {
-            scoreBuffer.removeFirst()
-        }
-        val avg = scoreBuffer.sum() / scoreBuffer.size.toFloat()
-        return avg.coerceIn(0f, 1f)
+        smoothedScore = emaAlpha * v + (1f - emaAlpha) * smoothedScore
+        return smoothedScore.coerceIn(0f, 1f)
     }
 
     private data class P(val x: Float, val y: Float)
@@ -315,15 +337,13 @@ class SquatDetector(
         return try {
             lm.visibility().orElse(1f)
         } catch (_: Throwable) {
-            // según versión de MediaPipe, visibility puede no venir
             1f
         }
     }
 
     private fun normalize(value: Float, minVal: Float, maxVal: Float): Float {
         if (maxVal <= minVal) return 0f
-        val t = (value - minVal) / (maxVal - minVal)
-        return t.coerceIn(0f, 1f)
+        return ((value - minVal) / (maxVal - minVal)).coerceIn(0f, 1f)
     }
 
     private fun distance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
@@ -332,9 +352,6 @@ class SquatDetector(
         return sqrt(dx * dx + dy * dy)
     }
 
-    /**
-     * Ángulo ABC (en B), en grados.
-     */
     private fun angleDeg(a: NormalizedLandmark, b: NormalizedLandmark, c: NormalizedLandmark): Float {
         val abx = a.x() - b.x()
         val aby = a.y() - b.y()
