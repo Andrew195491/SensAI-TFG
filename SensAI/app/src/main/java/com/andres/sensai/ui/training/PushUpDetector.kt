@@ -3,22 +3,74 @@ package com.andres.sensai.ui.training
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import kotlin.math.abs
 import kotlin.math.acos
+import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
 class PushUpDetector(
-    private val upThreshold: Float = 0.78f,
-    private val downThreshold: Float = 0.28f,
-    private val stableUpMs: Long = 90L,
-    private val stableDownMs: Long = 70L,
-    private val repCooldownMs: Long = 200L,
-    private val minVisibility: Float = 0.35f,
-    private val emaAlpha: Float = 0.38f,
-    private val minVelocity: Float = 0.015f,
-    private val maxAngleJump: Float = 30f,
-    private val minDepthScore: Float = 0.32f,
-    private val minTopScore: Float = 0.74f
+
+    /*
+     * Score necesario para considerar que el usuario
+     * está en la posición superior.
+     *
+     * Con la normalización 75°-170°:
+     * 0.70 equivale aproximadamente a 142°.
+     */
+    private val upThreshold: Float = 0.70f,
+
+    /*
+     * Score necesario para considerar que el usuario
+     * ha llegado a la posición inferior.
+     *
+     * 0.42 equivale aproximadamente a 115°.
+     */
+    private val downThreshold: Float = 0.42f,
+
+    private val stableUpMs: Long = 70L,
+    private val stableDownMs: Long = 50L,
+    private val repCooldownMs: Long = 220L,
+
+    /*
+     * MediaPipe puede perder parcialmente una articulación
+     * durante una flexión en suelo.
+     */
+    private val minVisibility: Float = 0.20f,
+
+    /*
+     * Respuesta relativamente rápida sin eliminar
+     * completamente el suavizado.
+     */
+    private val emaAlpha: Float = 0.55f,
+
+    /*
+     * Se conserva por compatibilidad y depuración.
+     *
+     * Ya no bloquea por sí sola las transiciones.
+     */
+    private val minVelocity: Float = 0.004f,
+
+    /*
+     * Si hay un salto superior, se recalibra la referencia
+     * en lugar de bloquear continuamente el detector.
+     */
+    private val maxAngleJump: Float = 65f,
+
+    private val minDepthScore: Float = 0.45f,
+    private val minTopScore: Float = 0.65f,
+
+    /*
+     * Una persona contra la pared suele acercarse a 90°.
+     * Una flexión real puede inclinarse algo por perspectiva.
+     */
+    private val maxHorizontalAngle: Float = 45f,
+
+    /*
+     * Tiempo durante el que se toleran landmarks inválidos
+     * sin reiniciar la repetición.
+     */
+    private val trackingGraceMs: Long = 300L
+
 ) {
 
     enum class State {
@@ -36,6 +88,8 @@ class PushUpDetector(
         val elbowAngleR: Float,
         val usedElbowAngle: Float,
         val bodyLineScore: Float,
+        val horizontalScore: Float,
+        val angleFromHorizontal: Float,
         val stableMs: Long,
         val cycleMinScore: Float,
         val cycleMaxScore: Float
@@ -54,23 +108,43 @@ class PushUpDetector(
     private var stateSinceMs: Long = 0L
     private var lastRepAtMs: Long = 0L
 
-    private var smoothedScore = 1f
-    private var prevSmoothScore = 1f
+    private var smoothedScore: Float = 1f
+    private var prevSmoothScore: Float = 1f
 
-    private var cycleMinScore = 1f
-    private var cycleMaxScore = 1f
+    private var cycleMinScore: Float = 1f
+    private var cycleMaxScore: Float = 1f
 
-    private var lastRawScore = 1f
-    private var lastSmoothScore = 1f
-    private var lastVelocity = 0f
-    private var lastElbowL = 180f
-    private var lastElbowR = 180f
-    private var lastUsedElbow = 180f
-    private var lastBodyLineScore = 1f
+    private var lastRawScore: Float = 1f
+    private var lastSmoothScore: Float = 1f
+    private var lastVelocity: Float = 0f
+
+    private var lastElbowL: Float = 180f
+    private var lastElbowR: Float = 180f
+    private var lastUsedElbow: Float = 180f
+
+    private var lastBodyLineScore: Float = 1f
+    private var lastHorizontalScore: Float = 0f
+    private var lastAngleFromHorizontal: Float = 90f
+
+    /*
+     * null  -> lado todavía no bloqueado
+     * true  -> brazo izquierdo
+     * false -> brazo derecho
+     *
+     * Durante una repetición se conserva el mismo lado.
+     */
+    private var lockedUseLeft: Boolean? = null
+
+    /*
+     * Control de pérdidas breves de seguimiento.
+     */
+    private var trackingLostSinceMs: Long = 0L
+    private var needsRebaseline: Boolean = true
 
     fun reset(nowMs: Long = 0L) {
         state = State.WAIT_UP
         reps = 0
+
         stateSinceMs = nowMs
         lastRepAtMs = 0L
 
@@ -83,68 +157,211 @@ class PushUpDetector(
         lastRawScore = 1f
         lastSmoothScore = 1f
         lastVelocity = 0f
+
         lastElbowL = 180f
         lastElbowR = 180f
         lastUsedElbow = 180f
+
         lastBodyLineScore = 1f
+        lastHorizontalScore = 0f
+        lastAngleFromHorizontal = 90f
+
+        lockedUseLeft = null
+
+        trackingLostSinceMs = 0L
+        needsRebaseline = true
     }
 
-    fun update(landmarks: List<NormalizedLandmark>, nowMs: Long): Output {
-        if (stateSinceMs == 0L) stateSinceMs = nowMs
+    fun update(
+        landmarks: List<NormalizedLandmark>,
+        nowMs: Long
+    ): Output {
+
+        if (stateSinceMs == 0L) {
+            stateSinceMs = nowMs
+        }
 
         if (landmarks.size < 33) {
+            handleTrackingLoss(nowMs)
             return buildOutput(nowMs)
         }
 
-        val feat = computeFeatures(landmarks)
-        if (!feat.isReliable) {
+        val features = computeFeatures(landmarks)
+
+        /*
+         * Actualizamos siempre la información visual
+         * para poder verla en Debug.
+         */
+        lastElbowL = features.elbowL
+        lastElbowR = features.elbowR
+        lastBodyLineScore = features.bodyLineScore
+        lastHorizontalScore = features.horizontalScore
+        lastAngleFromHorizontal = features.angleFromHorizontal
+
+        /*
+         * Si el frame no es válido, se mantiene el estado.
+         * No se cancela inmediatamente la repetición.
+         */
+        if (!features.isReliable) {
+            handleTrackingLoss(nowMs)
             return buildOutput(nowMs)
         }
 
-        if (abs(feat.usedElbow - lastUsedElbow) > maxAngleJump) {
+        /*
+         * El seguimiento ha vuelto a ser válido.
+         */
+        trackingLostSinceMs = 0L
+
+        /*
+         * Después de perder seguimiento se toma el primer
+         * ángulo válido como nueva referencia.
+         */
+        if (needsRebaseline) {
+            needsRebaseline = false
+
+            lastUsedElbow = features.usedElbow
+
+            val initialScore = normalize(
+                value = features.usedElbow,
+                minVal = 75f,
+                maxVal = 170f
+            )
+
+            smoothedScore = initialScore
+            prevSmoothScore = initialScore
+
+            lastRawScore = initialScore
+            lastSmoothScore = initialScore
+            lastVelocity = 0f
+
             return buildOutput(nowMs)
         }
 
-        val rawScore = feat.upScore
+        val angleJump =
+            abs(features.usedElbow - lastUsedElbow)
+
+        /*
+         * Antes el frame se rechazaba y la referencia antigua
+         * permanecía sin actualizarse.
+         *
+         * Ahora se recalibra, evitando que el detector quede
+         * bloqueado después de una oclusión.
+         */
+        if (angleJump > maxAngleJump) {
+            lastUsedElbow = features.usedElbow
+
+            val recalibratedScore = normalize(
+                value = features.usedElbow,
+                minVal = 75f,
+                maxVal = 170f
+            )
+
+            smoothedScore = recalibratedScore
+            prevSmoothScore = recalibratedScore
+
+            lastRawScore = recalibratedScore
+            lastSmoothScore = recalibratedScore
+            lastVelocity = 0f
+
+            return buildOutput(nowMs)
+        }
+
+        lastUsedElbow = features.usedElbow
+
+        val rawScore = features.upScore
         val smoothScore = smooth(rawScore)
-        val velocity = smoothScore - prevSmoothScore
+
+        val velocity =
+            smoothScore - prevSmoothScore
+
         prevSmoothScore = smoothScore
 
-        val stableMs = nowMs - stateSinceMs
-        val cooldownOk = (nowMs - lastRepAtMs) >= repCooldownMs
+        val stableMs =
+            nowMs - stateSinceMs
+
+        val cooldownOk =
+            nowMs - lastRepAtMs >= repCooldownMs
 
         when (state) {
-            State.WAIT_UP -> {
-                cycleMaxScore = max(cycleMaxScore, smoothScore)
 
-                if (smoothScore < upThreshold && velocity < -minVelocity) {
+            State.WAIT_UP -> {
+                /*
+                 * En reposo se permite seleccionar el brazo
+                 * que tenga mayor visibilidad.
+                 */
+                lockedUseLeft = null
+
+                cycleMaxScore =
+                    max(cycleMaxScore, smoothScore)
+
+                /*
+                 * Se inicia la bajada al abandonar claramente
+                 * la posición superior.
+                 *
+                 * No exigimos una velocidad mínima alta.
+                 */
+                if (
+                    smoothScore < upThreshold - 0.05f
+                ) {
                     state = State.GOING_DOWN
                     stateSinceMs = nowMs
+
                     cycleMinScore = smoothScore
+                    cycleMaxScore = max(
+                        cycleMaxScore,
+                        smoothScore
+                    )
+
+                    lockedUseLeft = features.useLeft
                 }
             }
 
             State.GOING_DOWN -> {
-                cycleMinScore = min(cycleMinScore, smoothScore)
+                cycleMinScore =
+                    min(cycleMinScore, smoothScore)
 
-                if (smoothScore >= upThreshold && velocity > minVelocity) {
-                    state = State.WAIT_UP
-                    stateSinceMs = nowMs
-                    cycleMaxScore = max(cycleMaxScore, smoothScore)
-                } else if (
+                /*
+                 * Posición inferior.
+                 *
+                 * Se permite un pequeño margen para que no dependa
+                 * de alcanzar un score exacto durante muchos frames.
+                 */
+                if (
                     smoothScore <= downThreshold &&
-                    stableMs >= stableDownMs &&
-                    velocity <= 0.01f
+                    stableMs >= stableDownMs
                 ) {
                     state = State.WAIT_DOWN
                     stateSinceMs = nowMs
+
+                    /*
+                     * Si vuelve arriba sin llegar abajo,
+                     * se cancela el intento.
+                     */
+                } else if (
+                    smoothScore >= upThreshold &&
+                    stableMs >= stableUpMs
+                ) {
+                    state = State.WAIT_UP
+                    stateSinceMs = nowMs
+
+                    cycleMinScore = 1f
+                    cycleMaxScore = smoothScore
+
+                    lockedUseLeft = null
                 }
             }
 
             State.WAIT_DOWN -> {
-                cycleMinScore = min(cycleMinScore, smoothScore)
+                cycleMinScore =
+                    min(cycleMinScore, smoothScore)
 
-                if (smoothScore > downThreshold && velocity > minVelocity) {
+                /*
+                 * Empieza la subida al abandonar claramente
+                 * la zona inferior.
+                 */
+                if (
+                    smoothScore > downThreshold + 0.06f
+                ) {
                     state = State.GOING_UP
                     stateSinceMs = nowMs
                     cycleMaxScore = smoothScore
@@ -152,11 +369,23 @@ class PushUpDetector(
             }
 
             State.GOING_UP -> {
-                cycleMaxScore = max(cycleMaxScore, smoothScore)
+                cycleMaxScore =
+                    max(cycleMaxScore, smoothScore)
 
-                if (smoothScore <= downThreshold && velocity < -minVelocity) {
+                /*
+                 * Si vuelve a bajar antes de completar,
+                 * regresa al estado inferior.
+                 */
+                if (
+                    smoothScore <= downThreshold &&
+                    stableMs >= stableDownMs
+                ) {
                     state = State.WAIT_DOWN
                     stateSinceMs = nowMs
+
+                    /*
+                     * Completa la repetición al regresar arriba.
+                     */
                 } else if (
                     smoothScore >= upThreshold &&
                     stableMs >= stableUpMs &&
@@ -165,12 +394,16 @@ class PushUpDetector(
                     cycleMaxScore >= minTopScore
                 ) {
                     reps += 1
+
                     lastRepAtMs = nowMs
+
                     state = State.WAIT_UP
                     stateSinceMs = nowMs
 
                     cycleMinScore = 1f
                     cycleMaxScore = smoothScore
+
+                    lockedUseLeft = null
                 }
             }
         }
@@ -178,120 +411,273 @@ class PushUpDetector(
         lastRawScore = rawScore
         lastSmoothScore = smoothScore
         lastVelocity = velocity
-        lastElbowL = feat.elbowL
-        lastElbowR = feat.elbowR
-        lastUsedElbow = feat.usedElbow
-        lastBodyLineScore = feat.bodyLineScore
+
+        lastElbowL = features.elbowL
+        lastElbowR = features.elbowR
+        lastUsedElbow = features.usedElbow
+
+        lastBodyLineScore =
+            features.bodyLineScore
+
+        lastHorizontalScore =
+            features.horizontalScore
+
+        lastAngleFromHorizontal =
+            features.angleFromHorizontal
 
         return buildOutput(nowMs)
     }
 
+    /*
+     * Tolera pérdidas breves de landmarks.
+     */
+    private fun handleTrackingLoss(
+        nowMs: Long
+    ) {
+        if (trackingLostSinceMs == 0L) {
+            trackingLostSinceMs = nowMs
+        }
+
+        /*
+         * Después de una pérdida prolongada, el siguiente
+         * frame válido se utilizará como nueva referencia.
+         *
+         * No se reinicia el contador de repeticiones.
+         */
+        if (
+            nowMs - trackingLostSinceMs >
+            trackingGraceMs
+        ) {
+            needsRebaseline = true
+        }
+    }
+
     private data class Features(
         val isReliable: Boolean,
+        val useLeft: Boolean,
         val upScore: Float,
         val elbowL: Float,
         val elbowR: Float,
         val usedElbow: Float,
-        val bodyLineScore: Float
+        val bodyLineScore: Float,
+        val horizontalScore: Float,
+        val angleFromHorizontal: Float
     )
 
-    private fun computeFeatures(lm: List<NormalizedLandmark>): Features {
-        val lShoulder = lm[11]
-        val rShoulder = lm[12]
-        val lElbow = lm[13]
-        val rElbow = lm[14]
-        val lWrist = lm[15]
-        val rWrist = lm[16]
-        val lHip = lm[23]
-        val rHip = lm[24]
-        val lAnkle = lm[27]
-        val rAnkle = lm[28]
+    private fun computeFeatures(
+        landmarks: List<NormalizedLandmark>
+    ): Features {
 
-        val visLeft =
-            visibilityOf(lShoulder) +
-                    visibilityOf(lElbow) +
-                    visibilityOf(lWrist)
+        val leftShoulder = landmarks[11]
+        val rightShoulder = landmarks[12]
 
-        val visRight =
-            visibilityOf(rShoulder) +
-                    visibilityOf(rElbow) +
-                    visibilityOf(rWrist)
+        val leftElbow = landmarks[13]
+        val rightElbow = landmarks[14]
 
-        val leftOk =
-            visibilityOf(lShoulder) >= minVisibility &&
-                    visibilityOf(lElbow) >= minVisibility &&
-                    visibilityOf(lWrist) >= minVisibility
+        val leftWrist = landmarks[15]
+        val rightWrist = landmarks[16]
 
-        val rightOk =
-            visibilityOf(rShoulder) >= minVisibility &&
-                    visibilityOf(rElbow) >= minVisibility &&
-                    visibilityOf(rWrist) >= minVisibility
+        val leftHip = landmarks[23]
+        val rightHip = landmarks[24]
 
-        val bodyOk =
-            visibilityOf(lHip) >= minVisibility &&
-                    visibilityOf(rHip) >= minVisibility &&
-                    visibilityOf(lAnkle) >= minVisibility &&
-                    visibilityOf(rAnkle) >= minVisibility
+        val leftAnkle = landmarks[27]
+        val rightAnkle = landmarks[28]
 
-        if (!leftOk && !rightOk) {
+        val leftArmOk =
+            visibilityOf(leftShoulder) >= minVisibility &&
+                    visibilityOf(leftElbow) >= minVisibility &&
+                    visibilityOf(leftWrist) >= minVisibility
+
+        val rightArmOk =
+            visibilityOf(rightShoulder) >= minVisibility &&
+                    visibilityOf(rightElbow) >= minVisibility &&
+                    visibilityOf(rightWrist) >= minVisibility
+
+        if (!leftArmOk && !rightArmOk) {
+            return invalidFeatures()
+        }
+
+        val leftElbowAngle =
+            if (leftArmOk) {
+                angleDeg(
+                    leftShoulder,
+                    leftElbow,
+                    leftWrist
+                )
+            } else {
+                lastElbowL
+            }
+
+        val rightElbowAngle =
+            if (rightArmOk) {
+                angleDeg(
+                    rightShoulder,
+                    rightElbow,
+                    rightWrist
+                )
+            } else {
+                lastElbowR
+            }
+
+        val leftArmVisibility =
+            visibilityOf(leftShoulder) +
+                    visibilityOf(leftElbow) +
+                    visibilityOf(leftWrist)
+
+        val rightArmVisibility =
+            visibilityOf(rightShoulder) +
+                    visibilityOf(rightElbow) +
+                    visibilityOf(rightWrist)
+
+        /*
+         * Durante una repetición se mantiene el brazo seleccionado.
+         */
+        val useLeft = when {
+
+            lockedUseLeft == true && leftArmOk ->
+                true
+
+            lockedUseLeft == false && rightArmOk ->
+                false
+
+            leftArmOk && !rightArmOk ->
+                true
+
+            !leftArmOk && rightArmOk ->
+                false
+
+            else ->
+                leftArmVisibility >= rightArmVisibility
+        }
+
+        val shoulder =
+            if (useLeft) leftShoulder else rightShoulder
+
+        val elbow =
+            if (useLeft) leftElbow else rightElbow
+
+        val wrist =
+            if (useLeft) leftWrist else rightWrist
+
+        val hip =
+            if (useLeft) leftHip else rightHip
+
+        val ankle =
+            if (useLeft) leftAnkle else rightAnkle
+
+        val usedElbowAngle =
+            if (useLeft) {
+                leftElbowAngle
+            } else {
+                rightElbowAngle
+            }
+
+        /*
+         * La cadera y el tobillo solo se usan para comprobar
+         * que el cuerpo está horizontal.
+         *
+         * Se les aplica un umbral algo más permisivo.
+         */
+        val bodyVisibilityThreshold =
+            minVisibility * 0.70f
+
+        val selectedBodyOk =
+            visibilityOf(hip) >= bodyVisibilityThreshold &&
+                    visibilityOf(ankle) >= bodyVisibilityThreshold
+
+        if (!selectedBodyOk) {
             return Features(
                 isReliable = false,
+                useLeft = useLeft,
                 upScore = lastSmoothScore,
-                elbowL = lastElbowL,
-                elbowR = lastElbowR,
-                usedElbow = lastUsedElbow,
-                bodyLineScore = lastBodyLineScore
+                elbowL = leftElbowAngle,
+                elbowR = rightElbowAngle,
+                usedElbow = usedElbowAngle,
+                bodyLineScore = lastBodyLineScore,
+                horizontalScore = lastHorizontalScore,
+                angleFromHorizontal = lastAngleFromHorizontal
             )
         }
 
-        val elbowAngleL = if (leftOk) angleDeg(lShoulder, lElbow, lWrist) else lastElbowL
-        val elbowAngleR = if (rightOk) angleDeg(rShoulder, rElbow, rWrist) else lastElbowR
-
-        val useLeft = when {
-            leftOk && !rightOk -> true
-            !leftOk && rightOk -> false
-            else -> visLeft >= visRight
-        }
-
-        val usedElbow = if (useLeft) elbowAngleL else elbowAngleR
-
-        val elbowUp = normalize(
-            value = usedElbow,
+        val elbowUpScore = normalize(
+            value = usedElbowAngle,
             minVal = 75f,
             maxVal = 170f
         )
 
-        val bodyLineScore = if (bodyOk) {
-            val shoulder = avgPoint(lShoulder, rShoulder)
-            val hip = avgPoint(lHip, rHip)
-            val ankle = avgPoint(lAnkle, rAnkle)
+        val bodyAngle = angleDeg(
+            shoulder,
+            hip,
+            ankle
+        )
 
-            val bodyAngle = angleDeg(shoulder, hip, ankle)
-            normalize(
-                value = bodyAngle,
-                minVal = 150f,
-                maxVal = 180f
+        val bodyLineScore = normalize(
+            value = bodyAngle,
+            minVal = 140f,
+            maxVal = 180f
+        )
+
+        val deltaX =
+            ankle.x() - shoulder.x()
+
+        val deltaY =
+            ankle.y() - shoulder.y()
+
+        val angleFromHorizontal =
+            Math.toDegrees(
+                atan2(
+                    abs(deltaY),
+                    abs(deltaX)
+                ).toDouble()
+            ).toFloat()
+
+        /*
+         * Se usa principalmente para depuración.
+         */
+        val horizontalScore =
+            1f - normalize(
+                value = angleFromHorizontal,
+                minVal = 20f,
+                maxVal = 55f
             )
-        } else {
-            1f
-        }
 
-        val upScore = (
-                0.85f * elbowUp +
-                        0.15f * bodyLineScore
-                ).coerceIn(0f, 1f)
+        /*
+         * Conserva la limitación horizontal,
+         * pero con algo más de tolerancia.
+         */
+        val horizontalOk =
+            angleFromHorizontal <= maxHorizontalAngle
 
         return Features(
-            isReliable = true,
-            upScore = upScore,
-            elbowL = elbowAngleL,
-            elbowR = elbowAngleR,
-            usedElbow = usedElbow,
-            bodyLineScore = bodyLineScore
+            isReliable = horizontalOk,
+            useLeft = useLeft,
+            upScore = elbowUpScore.coerceIn(0f, 1f),
+            elbowL = leftElbowAngle,
+            elbowR = rightElbowAngle,
+            usedElbow = usedElbowAngle,
+            bodyLineScore = bodyLineScore,
+            horizontalScore = horizontalScore,
+            angleFromHorizontal = angleFromHorizontal
         )
     }
 
-    private fun buildOutput(nowMs: Long): Output {
+    private fun invalidFeatures(): Features {
+        return Features(
+            isReliable = false,
+            useLeft = lockedUseLeft ?: true,
+            upScore = lastSmoothScore,
+            elbowL = lastElbowL,
+            elbowR = lastElbowR,
+            usedElbow = lastUsedElbow,
+            bodyLineScore = lastBodyLineScore,
+            horizontalScore = lastHorizontalScore,
+            angleFromHorizontal = lastAngleFromHorizontal
+        )
+    }
+
+    private fun buildOutput(
+        nowMs: Long
+    ): Output {
         return Output(
             reps = reps,
             state = state,
@@ -304,6 +690,8 @@ class PushUpDetector(
                 elbowAngleR = lastElbowR,
                 usedElbowAngle = lastUsedElbow,
                 bodyLineScore = lastBodyLineScore,
+                horizontalScore = lastHorizontalScore,
+                angleFromHorizontal = lastAngleFromHorizontal,
                 stableMs = nowMs - stateSinceMs,
                 cycleMinScore = cycleMinScore,
                 cycleMaxScore = cycleMaxScore
@@ -311,58 +699,82 @@ class PushUpDetector(
         )
     }
 
-    private fun smooth(v: Float): Float {
-        smoothedScore = emaAlpha * v + (1f - emaAlpha) * smoothedScore
+    private fun smooth(
+        value: Float
+    ): Float {
+        smoothedScore =
+            emaAlpha * value +
+                    (1f - emaAlpha) * smoothedScore
+
         return smoothedScore.coerceIn(0f, 1f)
     }
 
-    private data class P(val x: Float, val y: Float)
-
-    private fun avgPoint(a: NormalizedLandmark, b: NormalizedLandmark): P {
-        return P(
-            x = (a.x() + b.x()) / 2f,
-            y = (a.y() + b.y()) / 2f
-        )
-    }
-
-    private fun visibilityOf(lm: NormalizedLandmark): Float {
+    private fun visibilityOf(
+        landmark: NormalizedLandmark
+    ): Float {
         return try {
-            lm.visibility().orElse(1f)
+            landmark.visibility().orElse(1f)
         } catch (_: Throwable) {
             1f
         }
     }
 
-    private fun normalize(value: Float, minVal: Float, maxVal: Float): Float {
-        if (maxVal <= minVal) return 0f
-        return ((value - minVal) / (maxVal - minVal)).coerceIn(0f, 1f)
+    private fun normalize(
+        value: Float,
+        minVal: Float,
+        maxVal: Float
+    ): Float {
+
+        if (maxVal <= minVal) {
+            return 0f
+        }
+
+        return (
+                (value - minVal) /
+                        (maxVal - minVal)
+                ).coerceIn(0f, 1f)
     }
 
-    private fun angleDeg(a: P, b: P, c: P): Float {
-        val abx = a.x - b.x
-        val aby = a.y - b.y
-        val cbx = c.x - b.x
-        val cby = c.y - b.y
+    private fun angleDeg(
+        first: NormalizedLandmark,
+        vertex: NormalizedLandmark,
+        third: NormalizedLandmark
+    ): Float {
 
-        val dot = abx * cbx + aby * cby
-        val abNorm = sqrt(abx * abx + aby * aby).coerceAtLeast(1e-6f)
-        val cbNorm = sqrt(cbx * cbx + cby * cby).coerceAtLeast(1e-6f)
+        val firstX =
+            first.x() - vertex.x()
 
-        val cosTheta = (dot / (abNorm * cbNorm)).coerceIn(-1f, 1f)
-        return Math.toDegrees(acos(cosTheta).toDouble()).toFloat()
-    }
+        val firstY =
+            first.y() - vertex.y()
 
-    private fun angleDeg(a: NormalizedLandmark, b: NormalizedLandmark, c: NormalizedLandmark): Float {
-        val abx = a.x() - b.x()
-        val aby = a.y() - b.y()
-        val cbx = c.x() - b.x()
-        val cby = c.y() - b.y()
+        val thirdX =
+            third.x() - vertex.x()
 
-        val dot = abx * cbx + aby * cby
-        val abNorm = sqrt(abx * abx + aby * aby).coerceAtLeast(1e-6f)
-        val cbNorm = sqrt(cbx * cbx + cby * cby).coerceAtLeast(1e-6f)
+        val thirdY =
+            third.y() - vertex.y()
 
-        val cosTheta = (dot / (abNorm * cbNorm)).coerceIn(-1f, 1f)
-        return Math.toDegrees(acos(cosTheta).toDouble()).toFloat()
+        val dot =
+            firstX * thirdX +
+                    firstY * thirdY
+
+        val firstNorm =
+            sqrt(
+                firstX * firstX +
+                        firstY * firstY
+            ).coerceAtLeast(1e-6f)
+
+        val thirdNorm =
+            sqrt(
+                thirdX * thirdX +
+                        thirdY * thirdY
+            ).coerceAtLeast(1e-6f)
+
+        val cosTheta =
+            (dot / (firstNorm * thirdNorm))
+                .coerceIn(-1f, 1f)
+
+        return Math.toDegrees(
+            acos(cosTheta.toDouble())
+        ).toFloat()
     }
 }

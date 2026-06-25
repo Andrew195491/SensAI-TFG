@@ -14,12 +14,12 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 private const val TAG_POSE = "SensAI-Pose"
 
 class PoseLandmarkerHelper(
-    context: Context,
-    modelAssetPath: String,
-    minPoseDetectionConfidence: Float,
-    minPosePresenceConfidence: Float,
-    minTrackingConfidence: Float,
-    numPoses: Int,
+    context: Context, // Accedes a la carpeta "assets"
+    modelAssetPath: String, // Ruta al modelo
+    minPoseDetectionConfidence: Float, // Mínima confianza de detección de persona
+    minPosePresenceConfidence: Float, // Mínima confianza de postura
+    minTrackingConfidence: Float, // Seguir el cuerpo entre frames
+    numPoses: Int, // Número de personas a detectar --> Entre 0 y 1 porque solo queremos una persona
 ) {
     private val landmarker: PoseLandmarker
 
@@ -39,7 +39,7 @@ class PoseLandmarkerHelper(
 
         val options = PoseLandmarker.PoseLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.IMAGE) // ✅ para debug por frame
+            .setRunningMode(RunningMode.IMAGE) // para debug por frame
             .setNumPoses(numPoses)
             .setMinPoseDetectionConfidence(minPoseDetectionConfidence)
             .setMinPosePresenceConfidence(minPosePresenceConfidence)

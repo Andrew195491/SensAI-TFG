@@ -1,7 +1,5 @@
 package com.andres.sensai.ui.home
 
-import android.content.Context
-import android.content.pm.ApplicationInfo
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,10 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -26,26 +22,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.andres.sensai.ui.navigation.NavRoutes
-import com.andres.sensai.ui.onboarding.UserSetupManager
-import com.andres.sensai.ui.profile.ProfileManager
-import com.andres.sensai.ui.training.DailyChallengeManager
-import com.andres.sensai.ui.training.ExerciseType
 
 @Composable
 fun HomeScreen(navController: NavController) {
-    val context = LocalContext.current
-    val showDevTools = remember { isDebuggableApp(context) }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -116,21 +103,6 @@ fun HomeScreen(navController: NavController) {
                 text = "Perfil",
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.titleMedium
-            )
-        }
-
-        if (showDevTools) {
-            DeveloperToolsCard(
-                onResetUser = {
-                    ProfileManager.resetProfile(context)
-                    UserSetupManager.reset(context)
-                    DailyChallengeManager.resetAll(context)
-
-                    navController.navigate(NavRoutes.ONBOARDING) {
-                        popUpTo(NavRoutes.HOME) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                }
             )
         }
 
@@ -248,54 +220,4 @@ private fun SimpleExerciseCard(
             }
         }
     }
-}
-
-@Composable
-private fun DeveloperToolsCard(
-    onResetUser: () -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFFF7043).copy(alpha = 0.14f)
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Herramientas de desarrollador",
-                color = Color(0xFFFF7043),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-
-            Text(
-                text = "Reinicia todo y vuelve a mostrar el onboarding como usuario nuevo.",
-                color = Color.White.copy(alpha = 0.8f),
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            Button(
-                onClick = onResetUser,
-                shape = RoundedCornerShape(18.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFFF7043),
-                    contentColor = Color.Black
-                )
-            ) {
-                Text(
-                    text = "Reiniciar usuario",
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
-private fun isDebuggableApp(context: Context): Boolean {
-    return (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 }

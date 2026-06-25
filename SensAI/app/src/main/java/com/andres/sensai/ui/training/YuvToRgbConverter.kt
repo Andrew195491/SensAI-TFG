@@ -40,7 +40,7 @@ class YuvToRgbConverter {
         // Y
         yBuffer.get(nv21, 0, ySize)
 
-        // VU interleaved (NV21)
+        // VU intercalado (NV21)
         val rowStride = image.planes[1].rowStride
         val pixelStride = image.planes[1].pixelStride
         val width = image.width

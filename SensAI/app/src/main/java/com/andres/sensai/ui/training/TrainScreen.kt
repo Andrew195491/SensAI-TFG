@@ -1,7 +1,5 @@
 package com.andres.sensai.ui.training
 
-import android.content.Context
-import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -74,7 +72,6 @@ private fun TrainContent(
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val showDevTools = remember { isDebuggableApp(context) }
 
     val squatDetector = remember {
         if (exerciseType == ExerciseType.SQUAT) SquatDetector() else null
@@ -124,13 +121,6 @@ private fun TrainContent(
         stableMs = 0L
         angleA = 180f
         angleB = 180f
-    }
-
-    fun reloadChallengeAndResetSession() {
-        challenge = DailyChallengeManager.getTodayChallenge(context, exerciseType)
-        challengeProgress = DailyChallengeManager.getProgress(context, challenge)
-        challengeCompleted = DailyChallengeManager.isCompleted(context, challenge)
-        resetSessionState()
     }
 
     LaunchedEffect(reps) {
@@ -214,19 +204,6 @@ private fun TrainContent(
                             .fillMaxWidth()
                             .align(Alignment.TopCenter),
                         navController = navController,
-                        showDevTools = showDevTools,
-                        onAdvanceDay = {
-                            DailyChallengeManager.advanceDeveloperDay(context)
-                            reloadChallengeAndResetSession()
-                            rewardBannerText = "Día +1 aplicado. Reto reiniciado."
-                            showRewardBanner = true
-                        },
-                        onResetDay = {
-                            DailyChallengeManager.resetDeveloperDay(context)
-                            reloadChallengeAndResetSession()
-                            rewardBannerText = "Fecha real restaurada."
-                            showRewardBanner = true
-                        },
                         showDebug = showDebug,
                         onToggleDebug = { showDebug = !showDebug }
                     )
@@ -246,8 +223,6 @@ private fun TrainContent(
                         challengeCompleted = challengeCompleted,
                         safeChallengeProgress = safeChallengeProgress,
                         challengeTarget = challenge.targetReps,
-                        showDevTools = showDevTools,
-                        currentDayLabel = DailyChallengeManager.getCurrentDayLabel(context),
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .padding(top = 64.dp)
@@ -269,8 +244,6 @@ private fun TrainContent(
                             stableMs = stableMs,
                             angleA = angleA,
                             angleB = angleB,
-                            showDevTools = showDevTools,
-                            dayOffset = DailyChallengeManager.getDeveloperDayOffset(context),
                             modifier = Modifier
                                 .align(Alignment.CenterStart)
                                 .fillMaxWidth(0.42f)
@@ -300,19 +273,6 @@ private fun TrainContent(
                         .fillMaxWidth()
                         .align(Alignment.TopCenter),
                     navController = navController,
-                    showDevTools = showDevTools,
-                    onAdvanceDay = {
-                        DailyChallengeManager.advanceDeveloperDay(context)
-                        reloadChallengeAndResetSession()
-                        rewardBannerText = "Día +1 aplicado. Reto reiniciado."
-                        showRewardBanner = true
-                    },
-                    onResetDay = {
-                        DailyChallengeManager.resetDeveloperDay(context)
-                        reloadChallengeAndResetSession()
-                        rewardBannerText = "Fecha real restaurada."
-                        showRewardBanner = true
-                    },
                     showDebug = showDebug,
                     onToggleDebug = { showDebug = !showDebug }
                 )
@@ -332,8 +292,6 @@ private fun TrainContent(
                     challengeCompleted = challengeCompleted,
                     safeChallengeProgress = safeChallengeProgress,
                     challengeTarget = challenge.targetReps,
-                    showDevTools = showDevTools,
-                    currentDayLabel = DailyChallengeManager.getCurrentDayLabel(context),
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(top = 64.dp)
@@ -355,8 +313,6 @@ private fun TrainContent(
                         stableMs = stableMs,
                         angleA = angleA,
                         angleB = angleB,
-                        showDevTools = showDevTools,
-                        dayOffset = DailyChallengeManager.getDeveloperDayOffset(context),
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .fillMaxWidth(0.62f)
@@ -382,9 +338,6 @@ private fun TrainContent(
 private fun TopOverlayRow(
     modifier: Modifier = Modifier,
     navController: NavController,
-    showDevTools: Boolean,
-    onAdvanceDay: () -> Unit,
-    onResetDay: () -> Unit,
     showDebug: Boolean,
     onToggleDebug: () -> Unit
 ) {
@@ -403,57 +356,18 @@ private fun TopOverlayRow(
             )
         }
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (showDevTools) {
-                TextButton(
-                    onClick = onAdvanceDay,
-                    modifier = Modifier
-                        .background(
-                            color = Color(0xFF1565C0).copy(alpha = 0.75f),
-                            shape = RoundedCornerShape(50)
-                        )
-                ) {
-                    Text(
-                        text = "Día +1",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                TextButton(
-                    onClick = onResetDay,
-                    modifier = Modifier
-                        .background(
-                            color = Color(0xFF455A64).copy(alpha = 0.75f),
-                            shape = RoundedCornerShape(50)
-                        )
-                ) {
-                    Text(
-                        text = "Hoy",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            TextButton(
-                onClick = onToggleDebug,
-                modifier = Modifier
-                    .background(
-                        color = Color.Black.copy(alpha = 0.45f),
-                        shape = RoundedCornerShape(50)
-                    )
-            ) {
-                Text(
-                    text = if (showDebug) "Ocultar debug" else "Debug",
-                    color = Color.White
+        TextButton(
+            onClick = onToggleDebug,
+            modifier = Modifier
+                .background(
+                    color = Color.Black.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(50)
                 )
-            }
+        ) {
+            Text(
+                text = if (showDebug) "Ocultar debug" else "Debug",
+                color = Color.White
+            )
         }
     }
 }
@@ -465,8 +379,6 @@ private fun RepsChallengeCard(
     challengeCompleted: Boolean,
     safeChallengeProgress: Int,
     challengeTarget: Int,
-    showDevTools: Boolean,
-    currentDayLabel: String,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -533,15 +445,6 @@ private fun RepsChallengeCard(
                 fontSize = 11.sp,
                 fontWeight = if (challengeCompleted) FontWeight.SemiBold else FontWeight.Normal
             )
-
-            if (showDevTools) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "día: $currentDayLabel",
-                    color = Color.White.copy(alpha = 0.5f),
-                    fontSize = 10.sp
-                )
-            }
         }
     }
 }
@@ -554,8 +457,6 @@ private fun DebugCard(
     stableMs: Long,
     angleA: Float,
     angleB: Float,
-    showDevTools: Boolean,
-    dayOffset: Int,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -593,10 +494,6 @@ private fun DebugCard(
                     "elbowR: ${angleB.toInt()}°"
                 }
             )
-
-            if (showDevTools) {
-                DebugText("dayOffset: $dayOffset")
-            }
         }
     }
 }
@@ -875,8 +772,4 @@ private fun exerciseTip(
             }
         }
     }
-}
-
-private fun isDebuggableApp(context: Context): Boolean {
-    return (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 }
